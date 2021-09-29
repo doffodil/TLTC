@@ -5,17 +5,17 @@ import os
 import time
 import datetime
 from utils import data_helpers, set_rand
-from text_cnn import TextCNN
+from models.text_cnn_tf import TextCNN
 from tensorflow.contrib import learn
 import gc
+gc.collect()
 
 
 # =================================================================================================================== #
 # data parameters
-tf.flags.DEFINE_float("dev_sample_percentage", .1, "Percentage of the training data to use for validation")
+tf.flags.DEFINE_float("dev_sample_percentage", 0.1, "Percentage of the training data to use for validation")
 tf.flags.DEFINE_string("data_dir", default="../data/semantic_data/", help="data files location")
-tf.flags.DEFINE_string("source_domain", default="book", help="source domain of data")
-tf.flags.DEFINE_string("target_domain", default="dvd", help="target domain of data")
+tf.flags.DEFINE_string("domain", default="book", help="source domain of data")
 
 # Model Hyper_parameters
 tf.flags.DEFINE_integer("embedding_dim", 128, "Dimensionality of character embedding (default: 128)")
@@ -27,9 +27,9 @@ tf.flags.DEFINE_float("l2_reg_lambda", 0.0, "L2 regularization lambda (default: 
 # Training parameters
 tf.flags.DEFINE_integer("SEED", 2, "random seed")
 tf.flags.DEFINE_integer("batch_size", 64, "Batch Size (default: 64)")
-tf.flags.DEFINE_integer("num_epochs", 50, "Number of training epochs (default: 50)")
+tf.flags.DEFINE_integer("num_epochs", 100, "Number of training epochs (default: 100)")
 tf.flags.DEFINE_integer("evaluate_every", 50, "Evaluate model on dev set after this many steps (default: 50)")
-tf.flags.DEFINE_integer("checkpoint_every", 100, "Save model after this many steps (default: 50)")
+tf.flags.DEFINE_integer("checkpoint_every", 50, "Save model after this many steps (default: 50)")
 tf.flags.DEFINE_integer("num_checkpoints", 5, "Number of checkpoints to store (default: 5)")
 
 # Misc Parameters
@@ -45,36 +45,33 @@ set_rand.set_random_seed(FLAGS.SEED)
 
 
 # =================================================================================================================== #
-def data_preprocess(source_domain = 'book', target_domain = 'dvd'):
+def data_preprocess(domain):
     # Load data
     print("Loading data...")
 
-    source_positive_data_file =  FLAGS.data_dir + FLAGS.source_domain + "_positive_1000.txt"
-    source_negative_data_file = FLAGS.data_dir + FLAGS.source_domain + "_negative_1000.txt"
-    target_positive_data_file = FLAGS.data_dir + FLAGS.target_domain + "_positive_1000.txt"
-    target_negative_data_file = FLAGS.data_dir + FLAGS.target_domain + "_negative_1000.txt"
-    sourcce_x_text, source_y = data_helpers.load_data_and_labels(source_positive_data_file, source_negative_data_file)
-    target_x_text, target_y = data_helpers.load_data_and_labels(target_positive_data_file, target_negative_data_file)
+    positive_data_file =  FLAGS.data_dir + domain + "_positive_1000.txt"
+    negative_data_file = FLAGS.data_dir + domain + "_negative_1000.txt"
+    x_text, y = data_helpers.load_data_and_labels(positive_data_file, negative_data_file)
 
     # Build vocabulary
-    max_document_length = max([len(x.split(" ")) for x in (sourcce_x_text + target_x_text)])
+    # TODO: using word2vec
+    max_document_length = max([len(x.split(" ")) for x in x_text])
     vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length)
-    x = np.array(list(vocab_processor.fit_transform(sourcce_x_text + target_x_text)))
-    source_x = x[0:2000]
-    target_x = x[-2000::]
+    x = np.array(list(vocab_processor.fit_transform(x_text)))
 
     # Randomly shuffle data
-    shuffle_indices = np.random.permutation(np.arange(len(source_x)))
-    x_shuffled = source_x[shuffle_indices]
-    y_shuffled = source_y[shuffle_indices]
+    shuffle_indices = np.random.permutation(np.arange(len(y)))
+    x_shuffled = x[shuffle_indices]
+    y_shuffled = y[shuffle_indices]
 
-    x_train = x_shuffled
-    y_train = y_shuffled
-    x_dev = target_x
-    y_dev = target_y
+    dev_sample_index = -1 * int(FLAGS.dev_sample_percentage * float(len(y)))
+    x_train, x_dev = x_shuffled[:dev_sample_index], x_shuffled[dev_sample_index:]
+    y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
 
     print("Vocabulary Size: {:d}".format(len(vocab_processor.vocabulary_)))
-    print(f"source domain:{FLAGS.source_domain}  =>  target domain:{FLAGS.target_domain}")
+    print(f"domain:{FLAGS.domain}")
+    print("Train/Dev split: {:d}/{:d}".format(len(y_train), len(y_dev)))
+
     return x_train, y_train, vocab_processor, x_dev, y_dev
 
 
@@ -116,8 +113,8 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
 
             # Output directory for models and summaries
             timestamp = int(time.time())
-            cache_dir = 'TC_CNN_' + FLAGS.source_domain + '_to_' + FLAGS.target_domain + '_' + str(timestamp)
-            out_dir = os.path.abspath(os.path.join(os.path.curdir, "exp1", cache_dir))
+            cache_dir = 'TC_CNN_' + FLAGS.domain
+            out_dir = os.path.abspath(os.path.join(os.path.curdir, "exp1_cache", cache_dir))
             print("Writing to {}\n".format(out_dir))
 
             # Summaries for loss and accuracy
@@ -169,33 +166,18 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
                 """
                 Evaluates model on a dev set
                 """
-
-                # generate batches
-                step = []
-                loss = []
-                accuracy = []
-                batches = data_helpers.batch_iter(
-                    list(zip(x_train, y_train)), 200,1)
-                for batch in batches:
-                    x_batch, y_batch = zip(*batch)
-                    feed_dict = {
-                        cnn.input_x: x_batch,
-                        cnn.input_y: y_batch,
-                        cnn.dropout_keep_prob: 1.0
-                    }
-                    stepi, summaries, lossi, accuracyi = sess.run(
-                        [global_step, dev_summary_op, cnn.loss, cnn.accuracy],
-                        feed_dict)
-                    step.append(stepi)
-                    loss.append(lossi)
-                    accuracy.append(accuracyi)
-                step1 = np.mean(step)
-                loss1 = np.mean(loss)
-                accuracy1 = np.mean(accuracy)
+                feed_dict = {
+                    cnn.input_x: x_batch,
+                    cnn.input_y: y_batch,
+                    cnn.dropout_keep_prob: 1.0
+                }
+                step, summaries, loss, accuracy = sess.run(
+                    [global_step, dev_summary_op, cnn.loss, cnn.accuracy],
+                    feed_dict)
                 time_str = datetime.datetime.now().isoformat()
-                print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step1, loss1, accuracy1))
+                print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
                 if writer:
-                    writer.add_summary(summaries, step1)
+                    writer.add_summary(summaries, step)
 
             # Generate batches
             source_batches = data_helpers.batch_iter(
@@ -215,7 +197,7 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
 
 
 def main(argv=None):
-    x_train, y_train, vocab_processor, x_dev, y_dev = data_preprocess(FLAGS.source_domain, FLAGS.target_domain)
+    x_train, y_train, vocab_processor, x_dev, y_dev = data_preprocess(FLAGS.domain)
     gc.collect()
     train(x_train, y_train, vocab_processor, x_dev, y_dev)
 
